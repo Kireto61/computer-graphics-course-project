@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / CMake
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive   # if you turned external/ into git submodules; safe otherwise
+
+      # ---- Linux deps for building GLFW from source ----
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # X11 + GL dev headers commonly needed by GLFW on Ubuntu
+          sudo apt-get install -y \
+            build-essential \
+            xorg-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            mesa-common-dev libglu1-mesa-dev
+
+      # (Optional) Use Ninja for faster multi-platform builds
+      - name: Install Ninja (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get install -y ninja-build; fi
+            if [ "$RUNNER_OS" = "macOS" ]; then brew install ninja || true; fi
+          fi
+
+      # ---- Configure ----
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGLFW_BUILD_EXAMPLES=OFF \
+            -DGLFW_BUILD_TESTS=OFF \
+            -DGLFW_BUILD_DOCS=OFF \
+            -DGLFW_INSTALL=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -G "Ninja"
+        shell: bash
+
+      # ---- Build ----
+      - name: Build
+        run: cmake --build build --parallel
+        shell: bash
+
+      # ---- (Optional) Upload the built executable as an artifact ----
+      - name: Upload artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skeleton-${{ matrix.os }}
+          path: |
+            build/skeleton
+            build/skeleton/*
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skeleton-${{ matrix.os }}
+          path: |
+            build/skeleton.exe
+            build/skeleton/*.exe
