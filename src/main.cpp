@@ -2,6 +2,7 @@
 // ------------------------------------------------------------
 // Minimal example using GLFW + GLAD + GLM that draws a stick-figure
 // skeleton (hierarchical bones) and animates a simple walk cycle.
+// Now with a solid triangulated SPHERE for the head.
 //
 // Build (Linux/Mac):
 //   c++ -std=c++17 main.cpp -lglfw -ldl -framework Cocoa -framework IOKit -framework CoreVideo \
@@ -28,7 +29,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 // ------------------------------------------------------------
-// Shader sources
+// Shader sources (position + color; no lighting)
 // ------------------------------------------------------------
 static const char* kVS = R"GLSL(
 #version 330 core
@@ -83,17 +84,13 @@ static GLuint makeProgram(){
 }
 
 // ------------------------------------------------------------
-// Simple bone hierarchy (stick figure)
-// Each bone has parent index, a bind offset (translation from parent),
-// and a local rotation (applied around its local origin).
+// Bones / Skeleton
 // ------------------------------------------------------------
 struct Bone {
     int parent;                 // -1 for root
     glm::vec3 bindOffset;       // from parent to this joint in bind pose
     glm::vec3 eulerDeg;         // current local rotation (XYZ degrees)
     float length;               // bone visual length (for child end)
-
-    // Computed each frame:
     glm::mat4 global;           // world-space transform of this joint
 };
 
@@ -120,7 +117,7 @@ struct Skeleton {
             glm::mat4 T = glm::translate(glm::mat4(1), bones[i].bindOffset);
             glm::mat4 R = rotXYZ(bones[i].eulerDeg);
             glm::mat4 local = T * R;
-            if(p >= 0) bones[i].global = bones[p].global * local; else bones[i].global = local;
+            bones[i].global = (p >= 0) ? bones[p].global * local : local;
         }
     }
 };
@@ -139,7 +136,7 @@ Skeleton makeHuman(){
     const float hipWidth = 0.18f, shoulderWidth = 0.28f;
 
     // Root at world origin; move pelvis up by pelvisH
-    int root = s.addBone(-1, {0, pelvisH, 0}, 0.0f);            // pelvis center (root)
+    int root = s.addBone(-1, {0, pelvisH, 0}, 0.0f);            // pelvis center (root, zero-length)
     int spine = s.addBone(root, {0, 0.0f, 0}, spineLen);         // spine from pelvis up
     int neck  = s.addBone(spine,{0, spineLen, 0}, neckLen);
     int head  = s.addBone(neck, {0, neckLen, 0}, headLen);
@@ -162,39 +159,41 @@ Skeleton makeHuman(){
     int elbowR = s.addBone(shoulderR, {0, -upperArm, 0}, lowerArm);
     int wristR = s.addBone(elbowR, {0, -lowerArm, 0}, handLen);
 
+    (void)ankleL; (void)wristL; (void)wristR; // silence unused warnings if any
     return s;
 }
 
-// Helper: extract joint world position from bone.global
-static glm::vec3 jointPos(const Bone& b){
-    return glm::vec3(b.global[3]);
-}
+// ------------------------------------------------------------
+// Geometry helpers
+// ------------------------------------------------------------
+struct LineVertex{ glm::vec3 pos; glm::vec3 col; };
+struct TriVertex { glm::vec3 pos; glm::vec3 col; };
 
-// Helper: given a joint and its length (along -Y), get endpoint position
+static glm::vec3 jointPos(const Bone& b){ return glm::vec3(b.global[3]); }
 static glm::vec3 endpointPos(const Bone& b){
-    // In bone local space, endpoint is at (0, -length, 0, 1)
     glm::vec4 p = b.global * glm::vec4(0, -b.length, 0, 1);
     return glm::vec3(p);
 }
-
-// Generate line vertices for the skeleton (joint-to-end for each bone)
-// Also add small cross for head end and ground grid for context.
-struct LineVertex{ glm::vec3 pos; glm::vec3 col; };
 
 static void appendLine(std::vector<LineVertex>& v, const glm::vec3& a, const glm::vec3& b, const glm::vec3& c){
     v.push_back({a,c}); v.push_back({b,c});
 }
 
-static std::vector<LineVertex> buildLines(const Skeleton& s){
+// Build all skeleton lines (skip zero-length bones like pelvis)
+static std::vector<LineVertex> buildSkeletonLines(const Skeleton& s){
     std::vector<LineVertex> v; v.reserve(s.bones.size()*2 + 200);
     const glm::vec3 boneColor(1.0f, 0.9f, 0.4f);
 
-    // Draw bones as joint->endpoint lines
-    for(const auto& b : s.bones){
+    for (size_t i = 0; i < s.bones.size(); ++i) {
+        const auto& b = s.bones[i];
+        // skip invisible or placeholder bones
+        if (b.length <= 0.001f) continue; // pelvis root
+        if (i == 0) continue;             // explicitly skip root bone
+        if (i == 3) continue;             // skip head bone (sphere)
         glm::vec3 a = jointPos(b);
         glm::vec3 e = endpointPos(b);
         appendLine(v, a, e, boneColor);
-    }
+    }    
 
     // Ground grid (XZ)
     const float G = 2.0f; int N = 20;
@@ -204,47 +203,99 @@ static std::vector<LineVertex> buildLines(const Skeleton& s){
         appendLine(v, { (float)i*0.1f, 0, -G }, {(float)i*0.1f, 0, +G}, c);
         appendLine(v, { -G, 0, (float)i*0.1f }, { +G, 0, (float)i*0.1f }, c);
     }
-
     return v;
 }
 
-// Simple walk-cycle animation (param t in seconds)
-// We animate hips forward/back, knees flex, shoulders/arms swing.
+// Build a UV-sphere (triangles) centered at the head center
+static std::vector<TriVertex> buildHeadSphereTris(const Skeleton& s, int stacks=16, int slices=24){
+    std::vector<TriVertex> tris;
+    if (s.bones.size() <= 3) return tris;
+    const glm::vec3 headColor(0.95f, 0.75f, 0.25f);
+
+    const Bone& head = s.bones[3];
+
+    // Neck joint = base of the head
+    glm::vec3 neckBase = jointPos(head);
+
+    // Sphere radius proportional to head bone length
+    float radius = head.length * 0.6f;
+
+    // "Up" direction of the head in world space (its +Y axis)
+    glm::vec3 up = glm::normalize(glm::vec3(head.global * glm::vec4(0,1,0,0)));
+
+    // Place the sphere so its bottom touches the neck base:
+    // center = neckBase + up * radius
+    glm::vec3 center = neckBase + up * radius;
+
+    // UV-sphere triangulation
+    std::vector<glm::vec3> ring((size_t)(slices+1));
+    std::vector<glm::vec3> prev;
+    for(int i=0;i<=stacks;i++){
+        float v = (float)i / (float)stacks;         // [0,1]
+        float phi = v * glm::pi<float>();           // [0,pi]
+        float sy = std::cos(phi);                   // y on unit sphere
+        float sr = std::sin(phi);                   // ring radius
+        for(int j=0;j<=slices;j++){
+            float u = (float)j / (float)slices;     // [0,1]
+            float theta = u * glm::two_pi<float>(); // [0,2pi]
+            float sx = sr * std::cos(theta);
+            float sz = sr * std::sin(theta);
+            // Build in the head's local axes: use head.global's basis
+            glm::vec3 X = glm::normalize(glm::vec3(head.global * glm::vec4(1,0,0,0)));
+            glm::vec3 Y = up; // already normalized
+            glm::vec3 Z = glm::normalize(glm::vec3(head.global * glm::vec4(0,0,1,0)));
+            ring[(size_t)j] = center + radius*(sx*X + sy*Y + sz*Z);
+        }
+        if(i==0){ prev = ring; continue; }
+        for(int j=0;j<slices;j++){
+            glm::vec3 p00 = prev[(size_t)j];
+            glm::vec3 p01 = prev[(size_t)(j+1)];
+            glm::vec3 p10 = ring[(size_t)j];
+            glm::vec3 p11 = ring[(size_t)(j+1)];
+
+            tris.push_back({p00, headColor});
+            tris.push_back({p10, headColor});
+            tris.push_back({p11, headColor});
+
+            tris.push_back({p00, headColor});
+            tris.push_back({p11, headColor});
+            tris.push_back({p01, headColor});
+        }
+        prev = ring;
+    }
+    return tris;
+}
+
+// ------------------------------------------------------------
+// Animation
+// ------------------------------------------------------------
 static void animateWalk(Skeleton& s, float t){
     float walkSpeed = 1.6f; // steps per second
     float phase = t * walkSpeed * glm::two_pi<float>();
 
-    // Convenience lambdas to set bone rotation by index
     auto setR = [&](int idx, float rx, float ry, float rz){ s.bones[idx].eulerDeg = {rx, ry, rz}; };
 
-    // Indices (built order in makeHuman)
-    int idx = 0;
     const int root=0, spine=1, neck=2, head=3;
     int hipL=4, kneeL=5, ankleL=6; int hipR=7, kneeR=8, ankleR=9;
     int shoulderL=10, elbowL=11, wristL=12; int shoulderR=13, elbowR=14, wristR=15;
 
-    // Pelvis subtle up/down (Z tilt small), also translate forward over time to simulate motion
-    // We'll not move root translation here to keep it simple; instead tilt hips.
     setR(root, 0.0f, 0.0f, 3.0f * std::sin(phase*0.5f));
 
-    // Spine and head counter-tilt
     setR(spine, 5.0f*std::sin(phase*0.5f), 0.0f, 0.0f);
     setR(neck, -3.0f*std::sin(phase*0.5f), 0.0f, 0.0f);
     setR(head, 2.0f*std::sin(phase*0.5f), 0.0f, 0.0f);
 
-    // Leg swing: hips rotate around X; knees flex when leg goes forward
-    float hipSwing = 30.0f * std::sin(phase);          // L/R opposite phase
+    float hipSwing = 30.0f * std::sin(phase);
     float kneeFlex = 25.0f * std::max(0.0f, std::sin(phase));
 
     setR(hipL,  hipSwing,  0, 0);
-    setR(kneeL, -kneeFlex, 0, 0); // knee bends in -X
+    setR(kneeL, -kneeFlex, 0, 0);
     setR(ankleL, 5.0f*std::sin(phase+0.4f), 0, 0);
 
     setR(hipR, -hipSwing,  0, 0);
     setR(kneeR, -25.0f * std::max(0.0f, std::sin(phase+glm::pi<float>())), 0, 0);
     setR(ankleR, 5.0f*std::sin(phase+glm::pi<float>()+0.4f), 0, 0);
 
-    // Arm swing opposite phase to legs; elbows flex slightly near extremes
     float armSwing = 35.0f * std::sin(phase + glm::pi<float>());
     float elbowFlex = 10.0f * std::max(0.0f, std::sin(phase + glm::pi<float>()));
 
@@ -256,11 +307,12 @@ static void animateWalk(Skeleton& s, float t){
     setR(elbowR,    -10.0f * std::max(0.0f, std::sin(phase)), 0, 0);
     setR(wristR,     5.0f*std::sin(phase+glm::pi<float>()+1.0f),0,0);
 
-    // Update global transforms after posing
     s.updateGlobals();
 }
 
-// Orbit camera control (very simple)
+// ------------------------------------------------------------
+// Camera & input
+// ------------------------------------------------------------
 struct Camera {
     float yaw = 30.0f, pitch = -15.0f, dist = 3.0f;
     glm::vec3 target = {0, 1.0f, 0};
@@ -276,19 +328,21 @@ struct Camera {
     }
 };
 
-// Input
 static bool g_mouseDown=false; static double g_lastX=0, g_lastY=0; static Camera g_cam;
 static void cursorPos(GLFWwindow*, double x, double y){ if(!g_mouseDown){ g_lastX=x; g_lastY=y; return; } double dx=x-g_lastX, dy=y-g_lastY; g_lastX=x; g_lastY=y; g_cam.yaw += (float)dx*0.3f; g_cam.pitch += (float)dy*0.3f; g_cam.pitch = glm::clamp(g_cam.pitch, -85.0f, 85.0f);} 
 static void mouseBtn(GLFWwindow*, int button, int action, int){ if(button==GLFW_MOUSE_BUTTON_LEFT) g_mouseDown = (action==GLFW_PRESS); }
 static void scrollCB(GLFWwindow*, double, double yoff){ g_cam.dist = glm::clamp(g_cam.dist - (float)yoff*0.2f, 1.2f, 8.0f); }
 
+// ------------------------------------------------------------
+// Main
+// ------------------------------------------------------------
 int main(){
     if(!glfwInit()){ std::fprintf(stderr, "Failed to init GLFW\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* win = glfwCreateWindow(1280, 720, "OpenGL3 Skeleton Walk", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(1280, 720, "OpenGL3 Skeleton Walk (Head Sphere)", nullptr, nullptr);
     if(!win){ std::fprintf(stderr, "Failed to create window\n"); glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
@@ -302,18 +356,29 @@ int main(){
     GLint uView = glGetUniformLocation(prog, "uView");
     GLint uProj = glGetUniformLocation(prog, "uProj");
 
-    // Geometry buffers (dynamic)
-    GLuint vao=0, vbo=0; glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    // --- VAO/VBO for lines (skeleton + grid)
+    GLuint vaoLines=0, vboLines=0; glGenVertexArrays(1, &vaoLines); glGenBuffers(1, &vboLines);
+    glBindVertexArray(vaoLines);
+    glBindBuffer(GL_ARRAY_BUFFER, vboLines);
     glBufferData(GL_ARRAY_BUFFER, 1024*1024, nullptr, GL_DYNAMIC_DRAW); // 1 MB
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)(sizeof(glm::vec3)));
     glBindVertexArray(0);
 
+    // --- VAO/VBO for triangles (head sphere)
+    GLuint vaoTris=0, vboTris=0; glGenVertexArrays(1, &vaoTris); glGenBuffers(1, &vboTris);
+    glBindVertexArray(vaoTris);
+    glBindBuffer(GL_ARRAY_BUFFER, vboTris);
+    glBufferData(GL_ARRAY_BUFFER, 1024*1024, nullptr, GL_DYNAMIC_DRAW); // 1 MB
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(TriVertex), (void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(TriVertex), (void*)(sizeof(glm::vec3)));
+    glBindVertexArray(0);
+
     Skeleton skel = makeHuman();
 
     glEnable(GL_DEPTH_TEST);
+    // glEnable(GL_CULL_FACE); glCullFace(GL_BACK); // optional: cull back-faces
+
     double start = glfwGetTime();
 
     while(!glfwWindowShouldClose(win)){
@@ -326,9 +391,15 @@ int main(){
         float t = (float)(glfwGetTime() - start);
         animateWalk(skel, t);
 
-        std::vector<LineVertex> verts = buildLines(skel);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(verts.size()*sizeof(LineVertex)), verts.data());
+        // Build/draw lines
+        std::vector<LineVertex> lineVerts = buildSkeletonLines(skel);
+        glBindBuffer(GL_ARRAY_BUFFER, vboLines);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(lineVerts.size()*sizeof(LineVertex)), lineVerts.data());
+
+        // Build/draw head sphere
+        std::vector<TriVertex> triVerts = buildHeadSphereTris(skel, /*stacks=*/16, /*slices=*/24);
+        glBindBuffer(GL_ARRAY_BUFFER, vboTris);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(triVerts.size()*sizeof(TriVertex)), triVerts.data());
 
         glm::mat4 V = g_cam.view();
         glm::mat4 P = glm::perspective(glm::radians(60.0f), w>0? (float)w/(float)h : 1.6f, 0.05f, 50.0f);
@@ -337,15 +408,22 @@ int main(){
         glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(V));
         glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(P));
 
-        glBindVertexArray(vao);
-        glDrawArrays(GL_LINES, 0, (GLint)verts.size());
+        // Draw triangles (head) first or last — either is fine with depth test
+        glBindVertexArray(vaoTris);
+        glDrawArrays(GL_TRIANGLES, 0, (GLint)triVerts.size());
+        glBindVertexArray(0);
+
+        glBindVertexArray(vaoLines);
+        glDrawArrays(GL_LINES, 0, (GLint)lineVerts.size());
         glBindVertexArray(0);
 
         glfwSwapBuffers(win);
     }
 
-    glDeleteBuffers(1, &vbo);
-    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vboLines);
+    glDeleteVertexArrays(1, &vaoLines);
+    glDeleteBuffers(1, &vboTris);
+    glDeleteVertexArrays(1, &vaoTris);
     glDeleteProgram(prog);
     glfwDestroyWindow(win);
     glfwTerminate();
