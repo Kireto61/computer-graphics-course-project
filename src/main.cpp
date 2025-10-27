@@ -123,45 +123,53 @@ struct Skeleton {
 };
 
 // Build a very small human-like hierarchy
-Skeleton makeHuman(){
+Skeleton makeHuman() {
     Skeleton s;
-    // Reference scale ~ 1.8m tall stick figure, Y is up.
-    const float pelvisH = 1.0f;     // pelvis height above origin
+    // Reference scale ~1.8 m tall stick figure, Y is up.
+    const float pelvisH = 1.0f;     // baseline hip height
     const float spineLen = 0.4f;    // spine
-    const float neckLen = 0.1f;
-    const float headLen = 0.22f;
+    const float neckLen  = 0.1f;
+    const float headLen  = 0.22f;
 
     const float upperLeg = 0.45f, lowerLeg = 0.45f, footLen = 0.18f;
     const float upperArm = 0.30f, lowerArm = 0.30f, handLen = 0.12f;
     const float hipWidth = 0.18f, shoulderWidth = 0.28f;
 
-    // Root at world origin; move pelvis up by pelvisH
-    int root = s.addBone(-1, {0, pelvisH, 0}, 0.0f);            // pelvis center (root, zero-length)
-    int spine = s.addBone(root, {0, 0.0f, 0}, spineLen);         // spine from pelvis up
-    int neck  = s.addBone(spine,{0, spineLen, 0}, neckLen);
-    int head  = s.addBone(neck, {0, neckLen, 0}, headLen);
+    // ------------------------------------------------------------
+    // Root pelvis center — raised high so "middle line" starts above hips
+    // ------------------------------------------------------------
+    int root = s.addBone(-1, {0, pelvisH + 0.30f, 0}, 0.0f);   // pelvis center (much higher)
+    int spine = s.addBone(root, {0, 0.0f, 0}, spineLen);
+    int neck  = s.addBone(spine, {0, spineLen, 0}, neckLen);
+    int head  = s.addBone(neck,  {0, neckLen, 0}, headLen);
 
-    // Legs: left (L) is +X, right (R) is -X
-    int hipL = s.addBone(root, {+hipWidth*0.5f, 0, 0}, upperLeg);
-    int kneeL= s.addBone(hipL, {0, -upperLeg, 0}, lowerLeg);
-    int ankleL=s.addBone(kneeL,{0, -lowerLeg, 0}, footLen);
+    // ------------------------------------------------------------
+    // Legs — attach far below pelvis so torso line clearly above them
+    // ------------------------------------------------------------
+    int hipL = s.addBone(root, {+hipWidth * 0.5f, -0.30f, 0}, upperLeg);
+    int kneeL = s.addBone(hipL, {0, -upperLeg, 0}, lowerLeg);
+    int ankleL = s.addBone(kneeL, {0, -lowerLeg, 0}, footLen);
 
-    int hipR = s.addBone(root, {-hipWidth*0.5f, 0, 0}, upperLeg);
-    int kneeR= s.addBone(hipR, {0, -upperLeg, 0}, lowerLeg);
-    int ankleR=s.addBone(kneeR,{0, -lowerLeg, 0}, footLen);
+    int hipR = s.addBone(root, {-hipWidth * 0.5f, -0.30f, 0}, upperLeg);
+    int kneeR = s.addBone(hipR, {0, -upperLeg, 0}, lowerLeg);
+    int ankleR = s.addBone(kneeR, {0, -lowerLeg, 0}, footLen);
 
-    // Arms: attach at top of spine/shoulders
-    int shoulderL = s.addBone(spine, {+shoulderWidth*0.5f, spineLen, 0}, upperArm);
+    // ------------------------------------------------------------
+    // Arms — attach at shoulder level
+    // ------------------------------------------------------------
+    int shoulderL = s.addBone(spine, {+shoulderWidth * 0.5f, spineLen, 0}, upperArm);
     int elbowL = s.addBone(shoulderL, {0, -upperArm, 0}, lowerArm);
     int wristL = s.addBone(elbowL, {0, -lowerArm, 0}, handLen);
 
-    int shoulderR = s.addBone(spine, {-shoulderWidth*0.5f, spineLen, 0}, upperArm);
+    int shoulderR = s.addBone(spine, {-shoulderWidth * 0.5f, spineLen, 0}, upperArm);
     int elbowR = s.addBone(shoulderR, {0, -upperArm, 0}, lowerArm);
     int wristR = s.addBone(elbowR, {0, -lowerArm, 0}, handLen);
 
-    (void)ankleL; (void)wristL; (void)wristR; // silence unused warnings if any
+    (void)ankleL; (void)wristL; (void)wristR;
     return s;
 }
+
+
 
 // ------------------------------------------------------------
 // Geometry helpers
